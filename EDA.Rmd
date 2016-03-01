@@ -1,0 +1,1024 @@
+---
+title: "Exploring 2016 U.S. Primary Election's Financial Contribution and Expenditure"
+author: "Nam Truong"
+date: "November 13, 2015"
+output: 
+  html_document:
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 12
+    theme: spacelab
+---
+
+# 0. Preface:
+
+I choose to do the analize the financial contribution and expenditure for 2016 U.S. Presidential Election data sets provided by [Federal Election Commission](http://fec.gov/) (FEC). Since it's still very early in the election campaign, the data is rather sparse and is still growing every minute. So, I decided to use the snapshot of the entire dataset instead of just one state. This snapshot was taken at 2:23 pm on Nov 12, 2015.
+
+_Please note that these datasets are a bit special. As transaction records, they only have one numerical variable each: Contribution Amount and Expenditure Amount. As a result, the raw datasets by themselves do not not have a lot to explore. Therefore, much of the analysis is done on the various aggregations of this dataset. Specifically, I will group the transactions by States to get the total contribution per State and compare this aggregated data with each State's GPD, Population and so on; I will also group the transactions by candidates to measure them against each other on various fronts._
+
+Along with data from FEC, I also use supplementary datesets to add features, and gain more insights into the primary data.
+
+All datasets in this analysis are included in the __data__ folder:
+
+1. CTB.csv: [FEC's Contribution Records](ftp://ftp.fec.gov/FEC/Presidential_Map/2016/P00000001/P00000001-ALL.zip)
+2. EXP.csv: [FEC's Expenditure Records](ftp://ftp.fec.gov/FEC/Presidential_Map/2016/P00000001/P00000001D-ALL.zip)
+7. CAN.csv: [FEC's Candidates Financial Summary](http://www.fec.gov/data/CandidateSummary.do)
+3. GDP.csv: [GDP in 2014 (In Million Dollars)](https://www.bea.gov/itable/iTable.cfm?ReqID=70&step=1#reqid=70&step=1&isuri=1)
+4. DPI.csv: [Diposable Personal Income in 2014 (In Thousand Dollars)](https://www.bea.gov/itable/iTable.cfm?ReqID=70&step=1#reqid=70&step=1&isuri=1)
+5. MED.csv: [Median Household Income in 2014](https://www.census.gov/hhes/www/income/data/statemedian/)
+6. POP.csv: [Population in 2014](http://factfinder.census.gov/faces/tableservices/jsf/pages/productview.xhtml)
+8. ABR.csv: [State Names and Abbreviations](http://statetable.com/)
+
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(
+  echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, 
+  cache.path = 'cache/', fig.path='figure/')
+```
+
+```{r load_packages}
+library(ggplot2)
+library(GGally)
+library(gridExtra)
+library(scales)
+
+library(plyr)
+library(dplyr)
+library(reshape2)
+library(lazyeval)
+```
+
+``````{r read_csv_files}
+
+# Read Primary Datasets
+
+ctb <- read.csv('data/CTB.csv', row.names = NULL) %>% tbl_df()
+exp <- read.csv('data/EXP.csv', row.names = NULL) %>% tbl_df()
+can <- read.csv('data/CAN.csv', row.names = NULL) %>% tbl_df()
+
+# Correct column names due to the lack of quotes in the first column
+
+columns = names(ctb)[2:length(ctb)]
+names(ctb) <- c(columns,'removeMe')
+ctb <-select(ctb, -removeMe)
+
+columns = names(exp)[2:length(exp)]
+names(exp) <- c(columns,'removeMe')
+exp <-select(exp, -removeMe)
+
+# Read Secondary Datasets
+
+gdp <- read.csv('data/GDP.csv', row.names = NULL) %>% tbl_df()
+dpi <- read.csv('data/DPI.csv', row.names = NULL) %>% tbl_df()
+med <- read.csv('data/MED.csv', row.names = NULL) %>% tbl_df()
+pop <- read.csv('data/POP.csv', row.names = NULL) %>% tbl_df()
+abr <- read.csv('data/ABR.csv', row.names = NULL) %>% tbl_df()
+
+```
+
+```{r correct_data_types_and_units}
+
+# Cast date columns into Date datatype
+ctb$date <- as.Date(ctb$contb_receipt_dt, "%d-%B-%y")
+exp$date <-as.Date(exp$disb_dt, "%d-%B-%y")
+
+# Cast FEC data from String to Double
+can <- can %>% select(can_id,can_par_aff,net_con,net_ope_exp,can_sta)
+can[,3:4] <- lapply(can[,3:4],function(x){as.numeric(gsub("[$,]","",x))})
+
+# Cast Median Household Income data into Double datatype
+med$MHI = as.double(gsub(',','',med$Median_Income))
+
+# Convert GDP data from Million Dollars to Dollars
+gdp <- gdp %>%  mutate(GDP = GDP_2014*10^6)
+
+# Convert DPI data from Thousand Dollars to Dollars
+dpi <- dpi %>% mutate(DPI = DPI_2014*10^3)
+
+
+```
+
+```{r create_states_dataframe, results='hide'}
+
+# Get Total Contribution, Contributors, and Expenditure of each State
+states.ctb <- ctb %>% group_by(contbr_st) %>% 
+  summarise(contribution=sum(contb_receipt_amt))
+states.ind <- ctb %>% group_by(contbr_st) %>%
+  summarise(contributors=length(unique(contbr_nm)))
+states.exp <- exp %>% group_by(recipient_st) %>% 
+  summarise(expenditure=sum(disb_amt))
+
+
+# Merge States Data
+states <- abr %>% 
+  merge(states.ctb, by.x="abbreviation", by.y="contbr_st",all.x = TRUE) %>%
+  merge(states.ind, by.x="abbreviation", by.y="contbr_st",all.x = TRUE) %>%
+  merge(states.exp, by.x="abbreviation", by.y="recipient_st",all.x = TRUE) %>%
+  merge(gdp, by.x="name", by.y="Area") %>%
+  merge(dpi, by.x="name", by.y="GeoName") %>% 
+  merge(med, by.x="name", by.y="State") %>% 
+  merge(pop, by.x="name", by.y="region") %>% 
+  rename(state=abbreviation, regNo = census_region,
+         region=census_region_name) %>% tbl_df() %>% 
+  select(state,name,region,regNo,population,contributors,
+         contribution,expenditure,GDP,DPI,MHI) 
+
+# Replace NAs with 0s
+states$contribution[is.na(states$contribution)] <- 0
+states$expenditure[is.na(states$expenditure)] <- 0
+
+head(states)
+
+```
+
+```{r create_candidates_dataframe, results='hide'}
+
+# Get Number of Invidivual Contributors Per Candidate
+cands.ind <- ctb %>% group_by(cand_id, contbr_nm) %>%
+  summarise(contribution = sum(contb_receipt_amt)) %>% 
+  filter(contribution>0) %>% 
+  summarise(contributors=length(unique(contbr_nm)))
+
+# Get Total Individual Contribution Per Candidate
+cands.con <- ctb %>% group_by(cand_id) %>%
+  summarise(ind_con=sum(contb_receipt_amt))
+
+# Get Candidates' Last Names and Full Names
+names <- unique(ctb[,c("cand_id","cand_nm")])
+
+names$candidate <- sapply(names$cand_nm, function(x){
+    strsplit(as.character(x),",")[[1]][1]
+  })
+names$full_name <- sapply(names$cand_nm, function(x){
+    name <- strsplit(as.character(x),",")[[1]]
+    first <- strsplit(name[2]," ")[[1]][2]
+    last <- name[1]
+    paste(first,last)
+  })
+names <- select(names,-cand_nm)
+
+# Merge Candidates Data
+cands <- can %>% rename(cand_id=can_id,state=can_sta) %>% 
+  merge(cands.ind,all.x=T) %>% 
+  merge(select(states,state,region,regNo),all.x=T) %>% 
+  merge(cands.con, all.x=T) %>% merge(names, all.x=T) %>% 
+  arrange(candidate) %>%  tbl_df() %>% 
+  select(cand_id,party=can_par_aff,candidate,contributors,
+         ind_con,net_con,net_ope_exp,full_name,state,region,regNo)
+
+head(cands)
+
+```
+
+```{r create_cumulative_dataframe, results='hide'}
+
+# Calculate cumulative number of contributions
+# A Positive Transaction counts as a contribution again
+# A Negative Transaction counts as a contribution lost
+ctb$contribution_gained <- sapply(
+  ctb$contb_receipt_amt, function(x){
+    if(x>0){1}
+    else{-1}
+  })
+
+# Cumulate Function: Get column's cummulative data by date
+cummulate <- function(df, col, cum_name){
+  cum_name <- deparse(substitute(cum_name))
+  cum_val <- list(interp(~cumsum(x),x=lazy(day_total)))
+  
+  df %>% group_by(cand_id, date) %>% arrange(date) %>%
+    summarise_( day_total=interp(~sum(v), v=lazy(col)) ) %>%
+    mutate_( .dots = setNames(cum_val, cum_name) ) %>% 
+    select(-day_total) %>% ungroup() %>%
+    merge(select(cands,cand_id,candidate,party)) %>% tbl_df()
+}
+
+cum.ind <- cummulate(ctb, contribution_gained, cum_num_contributions)
+cum.ctb <- cummulate(ctb, contb_receipt_amt, cum_contribution)
+cum.exp <- cummulate(exp, disb_amt, cum_expenditure)
+
+```
+
+# 1. Analysis
+
+## A. Data Summary
+
+```{r data_summary}
+
+summary(states)
+summary(cands)
+
+```
+
+
+## B. Univariate Plots
+
+### Transaction: Contribution Receipt Amount
+
+```{r contribution_receipt_amount}
+
+ggplot(ctb, aes(x=contb_receipt_amt))+
+  geom_histogram(binwidth=100)+
+  scale_x_continuous(labels=comma, limits=c(-100,10000),
+    breaks=c(seq(0, 3000, by=500),seq(4000, 10^5, by=1000)))+     
+  scale_y_continuous(labels=comma)
+
+
+ggplot(filter(ctb,contb_receipt_amt>0), aes(x=contb_receipt_amt))+
+  geom_histogram(binwidth=0.35)+
+  scale_x_log10(labels=comma, breaks=5^seq(0, 6, by=1),limits=c(1,16000))+     
+  scale_y_continuous(labels=comma)
+
+```
+
+Most contributions fall between $25 and $125. There are also a lot of contributions of $500, $1000 and, oddly, $2700.
+
+### Transactions: Disbursment Amount
+
+```{r disbursment_amount}
+
+ggplot(exp, aes(x=disb_amt))+
+  geom_histogram(binwidth=10)+
+  scale_x_continuous(labels=comma, limits=c(-100,2000),
+    breaks=c(seq(-100, 1000, by=100),seq(1200, 2000, by=200)))+     
+  scale_y_continuous(labels=comma)
+
+ggplot(filter(exp,disb_amt>0), aes(x=disb_amt))+
+  geom_histogram(binwidth=0.1)+
+  scale_x_log10(labels=comma, breaks=3^seq(0, 20, by=1),limits=c(1,10^6))+     
+  scale_y_continuous(labels=comma)
+
+```
+
+Most disbursments are less than $75. They also peak at $500, $1000 and $1500.
+
+### State: Population
+
+```{r population}
+
+ggplot(states, aes(x=population/10^6))+
+  geom_histogram(binwidth=1)+  
+  scale_y_continuous(labels=comma, breaks=1:15)+
+  scale_x_continuous(labels=comma, breaks=seq(0,40,2), limits=c(0,40))+
+  labs(x="State Population (in Million People)")
+
+```
+
+Most States have less then 3 million people. There are two outliers that have over 26 and 38 millions people, which are over 8 and 13 times more populated than most States.
+
+### State: Total Constribution 
+
+```{r constribution}
+
+ggplot(states, aes(x=contribution/10^6))+
+  geom_histogram(binwidth=0.5)+  
+  scale_y_continuous(breaks=1:15)+
+  scale_x_continuous(breaks=seq(0,40,2),limits=c(0,27))+
+  labs(x="Contribution (in Million Dollars)")
+
+```
+
+The totals contributions by individuals by most States are less than 2 millions dollars.
+
+
+### States: Total Expenditure
+
+```{r expenditure}
+
+ggplot(states, aes(x=expenditure/10^6))+
+  geom_histogram(binwidth=0.5)+  
+  scale_y_continuous(breaks=2*0:10)+
+  scale_x_continuous(breaks=1*0:30,limits=c(0,27))+
+  labs(x="Expenditure (in Million Dollars)")
+
+```
+
+The total spending in each State are mostly less than half a million.
+
+### States: GDP
+
+```{r GDP}
+
+ggplot(states, aes(x=GDP/10^9))+
+  geom_histogram(binwidth=100)+  
+  scale_y_continuous(breaks=2*0:50)+
+  scale_x_continuous(breaks=c(100*0:10,200*6:15),limits=c(0,2400))+
+  labs(x="GDP (in Billion Dollars)")
+
+```
+
+Again, we see a similar shape of distribution. Most states have less than 200 billions dollars in GDP.
+
+### States: Disposable Personal Income
+
+```{r DPI}
+
+ggplot(states, aes(x=DPI/10^9))+
+  geom_histogram(binwidth=100)+  
+  scale_y_continuous(breaks=2*0:50)+
+  scale_x_continuous(breaks=c(100*0:10,200*6:15),limits=c(0,1700))+
+  labs(x="DPI (in Billion Dollars)")
+
+```
+
+The DPI index is a very similar shape to the GDP index. Most States' DPI are less than 200 billion dollars.
+
+### States: Median Household Income
+
+```{r MHI}
+
+ggplot(states, aes(x=MHI))+
+  geom_histogram(binwidth=4000)+
+  scale_x_continuous(labels=comma,breaks=10^4/2*0:100,limits=c(35000,80000))+
+  labs(x="Median Househole Income")
+
+ggplot(states, aes(x=MHI))+
+  geom_density(aes(x=MHI), color="black", lwd=1,fill="white")+
+  scale_x_continuous(labels=comma,breaks=10^4/2*0:100,limits=c(25000,86000))+
+  labs(x="Median Househole Income")
+
+```
+
+This distribution is almost normal. Most States have Median Household Income between $50,000 and $60,000 with the mode at $55,000.
+
+### Candidates: Number of Individual Contributors
+
+```{r contributors}
+
+ggplot(cands, aes(x=contributors))+
+  geom_histogram(binwidth=250)+
+  scale_y_continuous(labels=comma,breaks=5*0:30)+
+  scale_x_continuous(labels=comma,breaks=5000*0:20,limits=c(0,40000))+
+  labs(x="Number of Individual Contributors")
+```
+
+The majority of the listed candidates have almost no contributors
+
+### Candidates: Individual Contribution
+
+```{r ind_con}
+
+ggplot(cands, aes(x=ind_con/10^6))+
+  geom_histogram(binwidth=1)+
+  scale_y_continuous(labels=comma,breaks=2*0:40)+
+  scale_x_continuous(labels=comma,breaks=2*0:80,limits=c(0,80))+
+  labs(x="Individual Contribution (in Million Dollars)")
+
+ggplot(cands, aes(x=ind_con))+
+  geom_histogram(binwidth=0.5)+
+  scale_y_continuous(labels=comma,breaks=0:10)+
+  scale_x_log10(labels=comma,breaks=10^(0:10),limits=c(100,10^8))+
+  labs(x="Individual Contribution")
+
+```
+
+Half of the candidates have gotten less than $100,000 from individual contributors. On the other half, most have received over 1 million dollars and under 50 million dollars.
+
+### Candidates: Net Contribution
+
+```{r net_con}
+
+ggplot(cands, aes(x=net_con/10^6))+
+  geom_histogram(binwidth=1)+
+  scale_y_continuous(labels=comma,breaks=2*0:40)+
+  scale_x_continuous(labels=comma,breaks=2*0:80,limits=c(0,54))+
+  labs(x="Net Contribution (in Million Dollars)")
+
+ggplot(cands, aes(x=net_con))+
+  geom_histogram(binwidth=0.5)+
+  scale_y_continuous(labels=comma,breaks=0:10)+
+  scale_x_log10(labels=comma,breaks=10^(0:12),limits=c(50,10^9))+
+  labs(x="Net Contribution")
+
+```
+
+Half of the candidates have gotten less than $175,000 in contribution. On the other half, most have received over 1 million dollars and under 75 million dollars.
+
+### Candidates: Net Operating Expenditure
+
+```{r net_ope_exp}
+
+ggplot(cands, aes(x=net_ope_exp/10^6))+
+  geom_histogram(binwidth=1)+
+  scale_y_continuous(labels=comma,breaks=2*0:40)+
+  scale_x_continuous(labels=comma,breaks=2*0:80,limits=c(0,27))+
+  labs(x="Net Operating Expenditure (in Million Dollars)")
+
+ggplot(cands, aes(x=net_ope_exp))+
+  geom_histogram(binwidth=0.5)+
+  scale_y_continuous(labels=comma,breaks=0:10)+
+  scale_x_log10(labels=comma,breaks=10^(0:12),limits=c(100,10^8))+
+  labs(x="Net Operating Expenditure")
+
+```
+
+Half of the candidates have spent less than $100,000 on the election. On the other half, most spent over between $175,000 and $17,500,000.
+
+## C. Univariate Analysis
+
+### What is the structure of your dataset?
+
+The main datasets are transaction records of contribution received and spending of 2016 US Presidential Candidates. In the Contribution dataset, each record tell you which candidate the the contribution goes to, the amount of money, and some basic info about the contributor. In the Expenditure dataset, each record tells you which vendor/individual is being paid, the amount spent, the location and so on.
+
+### What is/are the main feature(s) of interest in your dataset?
+Since we're analyzing earning (via donations) and spending of the candidates, the contribution and expenditure features would be the main focus.
+
+### What other features in the dataset do you think will help support your investigation into your feature(s) of interest?
+The GDP, MHI, and DPI indices would be great in aiding State Contribution Analysis
+
+### Did you create any new variables from existing variables in the dataset?
+The "cand_id" variable holds the full name of each candidate in the "Last name, First name" format. I created a "Candidate" variable that holds only the last names, and "Fullname" variable that holds the full names in regular format for display purpose.
+
+I also created Per Capita variables by dividing States variable by the population (e.g. I created GDP\_per\_capita via dividing GDP by Population)
+
+### Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+
+The datasets by themselves do not provide us with a grand picture of how this election is going regarding the finance status of each candidate and how much each State is involved. Therefore, I aggregated this data, and combine it with other secondary datasets about US economy to create more interesting data. The results are 3 new datasets as follow:
+
+1. States: This dataset contains the total monetary contribution from each State along with other variables about the State's economics: Gross Domestic Product (GDP), Median Household Income (MHI), and Disposable Personal Income (DPI)
+2. Candidates: This dataset contains the total contribution received, amount of money spent per candidate, and number of contributors per candidate.
+3. Cummulations: This dataset contains cummulative contribution, and cummulative expenditure for each candidate over time.
+
+## D. Bivariate Plots
+
+```{r pairs_states, fig.height=12}
+
+ggpairs(states,5:11,axisLabels="internal")
+
+```
+
+
+In the States dataset, Contribution is highly correlated with Population, GDP, and DPI. We will look into how other features interact with each other for this dataset.
+
+```{r pairs_cands, fig.height=12}
+
+ggpairs(cands,4:7,axisLabels="internal")
+
+```
+
+
+In the Candidates dataset, all numerical value are highly correclted with one another. I will save this dataset for Multivariate section since there's much to explore for this dataset in this section. Moreover, it'smore fun to break Candidates into parties.
+
+### Individual Contribution Distribution by States
+
+```{r create_contr_distr}
+
+contr_distr <- ctb %>% group_by(contbr_st, contbr_nm) %>% 
+  summarise(individual_contribution = sum(contb_receipt_amt)) %>%
+  filter(individual_contribution > 0) %>%
+  merge(states,by.x="contbr_st",by.y="state") %>% tbl_df()
+
+```
+
+```{r contr_distr, fig.height=12}
+
+ggplot(contr_distr, aes(contbr_st, individual_contribution)) + geom_boxplot()
+
+```
+
+### Comparing States Contribution
+
+```{r compare_states_contribution}
+
+# Order by Contribution Amount
+states$state <- factor(states$state, 
+                       levels = states$state[order(-states$contribution)])
+
+ggplot(states,aes(x=state, y=contribution/10^6)) + 
+  geom_bar(stat = "identity") +
+  labs(x="States",y="Total Contribution (in million dollars)") 
+
+
+```
+
+California, Texas, New York, and Florida are way ahead of other states in term of total contribution in this election. However, these are also very populated States. Let's have a look at how Population and Contribution are related:
+
+### Contribution vs. Population
+
+```{r contribution_vs_population}
+
+ggplot(states, aes(x=population/10^6, y=contribution/10^6)) +
+  geom_point() + geom_smooth(method="lm") + 
+  scale_x_log10() + scale_y_log10() +
+  labs(x="Population (in Million People)",
+       y="Total Contribution (in Million Dollars)")
+
+```
+
+According to this graph, Total Contribution per state is proportional with its population. This could be one of the factors that explains why we have the top contributors the way they are. Would the States' economy sizes also affect the contribution amount as well?
+
+### Contribution vs. GDP and DPI
+
+```{r Contribution_vs_GDP}
+
+ggplot(states, aes(x=GDP/10^9, y=contribution/10^6)) +
+  geom_point() + geom_smooth(method="lm") + 
+  scale_x_log10(labels=comma) + scale_y_log10() +
+  labs(x="Gross Domestic Product (in Billion Dollars)",
+       y="Contribution (in Million Dollars)")
+
+```
+
+```{r Contribution_vs_MHI}
+
+ggplot(states, aes(x=DPI/10^9, y=contribution/10^6)) +
+  geom_point() + geom_smooth(method="lm") + 
+  scale_x_log10(labels=comma) + scale_y_log10() +
+  labs(x="Disposable Personal Income (in Billion Dollars)",
+       y="Contribution (in Million Dollars)")
+
+```
+
+Clearly, a State's GDP and DPI also explain its citizens' total contribution to the election.
+Let's look at the contribution data at a different angle. How about we compare the number of contributors of each State?
+
+### Comparing States Contributors
+
+```{r compare_states_contributors}
+
+ggplot(states,aes(x=state, y=contributors)) + 
+  geom_bar(stat = "identity") +
+  labs(x="States",y="Number of Contributors")
+
+```
+
+Again, California, Texas, New York, and Florida still dominate the chart and take the lead in number of contributors. I speculate that the number of contributors is highly correlated with the population.
+
+### Comparing States Population and Number of Contributors
+
+```{r compare_states_population}
+
+# Order by Contribution Amount
+states$state <- factor(states$state, 
+                       levels = states$state[order(-states$contribution)])
+
+ggplot(states,aes(x=state, y=population/10^6)) + 
+  geom_bar(stat = "identity")+
+  labs(x="States",y="Population (in Million People)")
+
+```
+
+```{r population_vs_contributors}
+
+ggplot(states, aes(x=contributors, y=population/10^6)) +
+  geom_point() + geom_smooth(method="lm") + 
+  scale_x_log10(labels=comma) + scale_y_log10() +
+  labs(x="Contributors",
+       y="Population (in Million Dollars)")
+
+```
+
+Looks like my spectulation was correct. The number of contributors and population are highly correlated. In this case, population might explain why certain States have more contributors than others.
+
+We need better statistics to compare the States since if we go by number of contributors or total contribution, larger and richer states would "win" easily. Let's measure the States by two new statistics:
+
+1. Involvement: Number of Contributors : Population ratio
+2. Generosity: Average Contribution : GDP per capita ratio
+
+### Comparing States Involvement
+
+```{r compare_states_involvement}
+
+# Create Involvement Feature
+states <- states %>% mutate(involvement=contributors/population)
+
+# Order by Involvement
+states$state <- factor(states$state, 
+                       levels = states$state[order(-states$involvement)])
+
+ggplot(states,aes(x=state, y=involvement)) + 
+  geom_bar(stat = "identity")+
+  labs(x="States",y="Involvement")
+
+```
+
+Vermont shoots up to be on top, and beats other States by a very large margin. Its involvement is over 2 times that of the runner up, which is New Hamshire. On the other hand, West Virginia and Mississppi are the least involved States.
+
+I tend to think that people who are better off and have some to spare, are more willing to make donations. Let's compare Involvement with GDP per capita, DHI per capita, and Median Household Income.
+
+```{r involvement_vs_GDP_per_capita}
+
+ggplot(states, aes(x=GDP/population, y=involvement)) +
+  geom_point() + geom_smooth(method="loess") +
+  labs(x="GDP Per Capita", y="Involvement")
+
+```
+
+```{r involvement_vs_DPI_per_capita}
+
+ggplot(states, aes(x=DPI/population, y=involvement)) +
+  geom_point() + geom_smooth(method="loess") +
+  labs(x="Disposable Personal Income Per Capita", y="Involvement")
+
+```
+
+```{r involvement_vs_MHI}
+
+ggplot(states, aes(x=MHI, y=involvement)) +
+  geom_point() + geom_smooth(method="loess") +
+  labs(x="Median Household Income", y="Involvement")
+
+```
+
+There are no correlations between Involvement and the economics features like I had hoped.
+
+### Comparing States Generosity
+
+```{r compare_states_generosity}
+
+# Create Generosity Feature
+states <- states %>% mutate(
+  generosity=(contribution/contributors)/(GDP/population))
+
+# Order by Generosity
+states$state <- factor(states$state, 
+                       levels = states$state[order(-states$generosity)])
+
+ggplot(states,aes(x=state, y=generosity)) + 
+  geom_bar(stat = "identity")+
+  labs(x="States",y="Generosity")
+
+```
+
+Florida, South Carolina, and Arkansas have taken the top spots on this graph. These States, while have average involvement, top the "generosity chart" because their contributors write relatively big checks comparing with the States' GDP per capita.
+
+```{r generosity_vs_DPI_per_capita}
+
+ggplot(states, aes(x=DPI/population, y=generosity)) +
+  geom_point() + geom_smooth(method="loess") +
+  labs(x="Disposable Personal Income Per Capita", y="generosity")
+
+```
+
+```{r generosity_vs_MHI}
+
+ggplot(states, aes(x=MHI, y=generosity)) +
+  geom_point() + geom_smooth(method="loess") +
+  labs(x="Median Household Income", y="generosity")
+
+```
+
+There are no correlations between generosity and the economics features either.
+Now just for fun, let's see how Median Household Income measures, GDP per capita, and DPI per capita correlate
+
+### Median Household Income vs GDP per capita vs DPI per capita
+
+```{r DPI_per_capita_vs_GDP_per_capita}
+
+ggplot(states, aes(x=GDP/population, y=DPI/population)) +
+  geom_point() + geom_smooth(method="loess") +
+  labs(x="GDP per capita", y="DPI per capita") + coord_fixed()
+
+```
+
+```{r GDP_per_capita_vs_MHI}
+
+ggplot(states, aes(x=MHI, y=GDP/population)) +
+  geom_point() + geom_smooth(method="loess") +
+  labs(y="GDP per capita", x="Median Household Income") + coord_fixed()
+
+```
+
+```{r DPI_per_capita_vs_MHI}
+
+ggplot(states, aes(x=MHI, y=DPI/population)) +
+  geom_point() + geom_smooth(method="loess") +
+  labs(y="DPI per capita",x="Median Household Income") + coord_fixed()
+
+```
+
+## E. Bivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?
+The Total Contribution is proportional with the States' economics features like GDP and DPI. The Number of Contributiors is also strongly correlated with Population.
+
+Surprisingly, the number of contributors has no correlations with GDP per capita, DPI per capita, and Median Household Income like I suspected. In fact, no features in this dataset could explain the number of contributors per state.
+
+### Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?
+We observed that GDP per capita and DPI per capita are strongly related. DPI per capita is also correlated with Median Household Income, though not as strong. However, there is almost no correlation between GDP per capita and Median Household Income.
+
+### What was the strongest relationship you found?
+The strongest relationship is Contribution vs Contributors with coefficient of 0.99.
+
+## F. Multivariate Plots
+
+```{r cands_prep}
+
+# Remove candidates with NA values (i.e. those who haven't received any
+# contribution from individuals) and non Democractic and Republican candidates
+# since this is a primary election analysis.
+cands <- na.omit(cands) %>% filter(party%in%c("DEM","REP"))
+cands$candidate = factor(cands$candidate, levels =
+                           cands$candidate[order(cands$party,-cands$ind_con)])
+
+```
+
+
+### Comparing Candidates' Contribution Received from Individuals
+
+```{r cands_ind_con_party}
+
+ggplot(cands,aes(candidate,ind_con/10^6,fill=party)) + 
+  geom_bar(stat="identity") + scale_y_continuous(breaks=10*0:15) +
+  labs(y="individual contribution (in million dollars)")
+
+```
+
+The total contribution to Clinton's campaign dwarfs those of other candidates. There's also quite a disparity within the Democratic candidates: Clinton's number is about 3 times that of all other DEM candidates' combined.
+
+Another interesting takeaway from this graph is that, Donald Trump, a front-runner on the Republican side, only received a mere 1 million dollars in individual contribution, according to this FEC data. Eventhough this is believable since Trump announced awhile back that he won't accept donation money, there were [reports in October](http://thehill.com/homenews/campaign/257106-trump-saves-his-own-money-thanks-to-38-million-in-donations) asserting that Trump have received nearly 4 millions dollars in donations. Let's have a look at net contribution from all sources
+
+### Comparing Candidates' Net Contribution
+
+```{r cands_net_con_party, fig.height=8}
+
+ggplot(cands,aes(candidate,net_con/10^6,fill=party)) + 
+  geom_bar(stat="identity") + scale_y_continuous(breaks=10*0:15) +
+  geom_bar(aes(candidate,ind_con/10^6),stat="identity",fill="white",alpha=0.4)+
+  labs(y="Contribution (in million dollars)")
+
+```
+
+In this graph, the lighter colored segment of each bar indicates the individual contribution portion of the total contribution. Clinton's still in the lead with a big gap between her and other candidates. Sanders, whoes number has increased 5 times, comes out ahead of all Republican candidates. Cruz, Carson, and Rudio have overtaken Bush as well. Also, Trum's number is now close to 4 million like reported.
+
+### Comparing Candidates' Number of Contributors
+
+```{r cands_contributors_party}
+
+ggplot(cands,aes(candidate,contributors,fill=party)) + 
+  geom_bar(stat="identity")+labs(y="Contributors")
+
+```
+
+Things have changed drastically when we change the perspective to Number of Contributors per Candidate. Clinton, while still takes the lead on the Demoractic side, is not too far ahead of the runner up, Bernard Sanders. This makes sense since Sanders, a very popular candidate among democrats, appeals to the less privileged and people of lower and middle social economy. His contributors are, understandably, not as well off as Clinton’s. Hence, eventhough he has a lot of supporters, the total contribution in dollars for Sanders is quite small, relatively. I would guess that Sanders has the smallest contribution average (i.e. Total Contribution / Number of Contributors) among all 20 candidates.
+
+### Comparing Candidates' Average Individual Contribution
+
+```{r cands_avgr_contribution_party}
+
+ggplot(cands,aes(candidate,ind_con/contributors,fill=party)) + 
+  geom_bar(stat="identity")+labs(y="Average Contribution")
+
+```
+
+My prediction was correct, Sanders does have the lowest contribution mean. I’m rather surprised at Christie’s and Jindal’s high contribution means. These candidates didn’t have a lot of contributors nor the total amount of countribution, but they sure do get big checks from the few contributors they have.
+
+### Comparing Candidates' Net Operating Expenditure
+
+```{r cands_net_ope_exp_party, fig.height=8}
+
+ggplot(cands,aes(candidate,net_con/10^6,color=party)) + 
+  geom_bar(aes(candidate,net_ope_exp/10^6,fill=party),stat="identity",alpha=0.25)+
+  geom_bar(aes(fill=party),stat="identity",alpha=0.25,width=0.1) + 
+  scale_y_continuous(breaks=10*0:15) +
+    labs(y="Net Operating Expenditure and Net Contribution (in million dollars)")
+
+```
+
+(In this graph, the thick bars show us the expenditure amount and the thin bars show the total contribution received for reference.)
+
+For most candidates, the amount spent is proportional with the amount received. Santorum and Trump are the only two candiates with total spending greater than net contribution, indicating that these candidates might have paid for things out of pocket.
+
+### Comparing Number of Contributors by Occupations
+
+```{r contributors_occupations_prep}
+
+temp  <-  as.character(ctb$contbr_occupation)
+temp[is.na(temp)] <- "INFORMATION REQUESTED"
+temp[grepl("RETIRED",temp)]<- "RETIRED"
+temp[grepl("UNEMPLOYED",temp)]<-"NOT EMPLOYED"
+temp[grepl("^[ ]*$",temp)]<-"INFORMATION REQUESTED"
+
+ctb$contbr_occupation <- temp
+
+con_occ = ctb %>% group_by(contbr_occupation) %>% 
+  summarise(count=length(contbr_occupation)) %>% arrange(desc(count)) %>%
+  filter(!grepl("(REQUESTED)|(NONE)|(N/A)",contbr_occupation))
+
+top_occ = con_occ$contbr_occupation[1:21]
+  
+con_occ <- ctb %>% filter(contbr_occupation %in% top_occ) %>% 
+  group_by(cand_id, contbr_occupation) %>% 
+  summarise(contributors=length(contbr_occupation)) %>% 
+  merge(select(cands,cand_id,candidate,party)) %>% tbl_df()
+
+```
+
+```{r contributors_occupations, fig.height=12}
+
+ggplot(con_occ,aes(candidate,contributors,fill=party)) + 
+  geom_bar(stat="identity")+
+  facet_wrap(~contbr_occupation,scales="free_y",ncol=3)+
+  theme(axis.text.x = element_text(angle = 90,vjust=0.1))
+
+```
+
+When we split the data by occupations of the contributors, there's quite an obvious trend: People of lower income brackets love Democrats, while the rich put the money (literally!) on the Republicans . Sanders gets almost all of the unemployed, while Bush gets most of the Self Employed.
+
+Interestingly enough, Software Engineers also much prefer Sanders than other candidates. In Education (Students, Teachers, Professors), Clinton and Sanders, the Democrat's front runners, are also very popular. Meanwhile, the retired are mostly on the Republican's side.
+
+### Comparing Spending by Regions
+
+```{r expenditure_regions_prep}
+
+exp_reg <- exp %>% group_by(cand_id,recipient_st) %>% 
+  summarise(expenditure=sum(disb_amt)) %>% 
+  merge(select(states,state,region),
+        by.x="recipient_st",by.y='state',all.x=T) %>% 
+  merge(select(cands,cand_id,candidate,party,full_name,cand_regNo=regNo),
+        all.x=T)  %>% 
+  filter(party%in%c("DEM","REP"), !is.na(region)) %>% tbl_df()
+
+exp_reg$full_name = factor(exp_reg$full_name,levels=
+                             cands$full_name[order(cands$party,-cands$ind_con)])
+
+```
+
+```{r expenditure_regions, fig.height=10}
+
+ggplot(exp_reg,aes(region,expenditure/10^6,fill=party)) + 
+  geom_bar(stat="identity")+
+  geom_vline(aes(xintercept=cand_regNo))+
+  facet_wrap(~full_name,scales="free_y",ncol=4)+
+  theme(axis.text.x = element_text(angle = 90),
+        axis.title.y=element_text())+
+  ylab("Expenditure (in Million Dollars)")
+
+```
+
+(In this graph, the veritical black line mark the candidate's home region)
+Interestingly enough, the Republican candidates spent a lot of money in the Southern States, whether it's their home region or not.
+
+### Comparing Contribution Cummulated Over Time of Top candidates
+
+```{r cum.ctb, fig.heigh=10}
+
+top_can <- c("Trump","Carson","Rubio","Cruz","Bush","Clinton","Sanders")
+temp <- cum.ctb %>% filter(candidate %in% top_can)
+
+ggplot(temp,aes(date,cum_contribution/10^6)) + 
+  geom_line(aes(color=candidate,group=candidate),size=1.1) +
+  scale_x_date(breaks="1 month", 
+               labels=date_format("%b"),
+               limits=as.Date(c('2015-01-01','2015-9-15')))+
+ facet_wrap(~party,scales="free_y",ncol=2)+
+ ylab("Contribution (in Million Dollars)")
+
+```
+
+(Top 2 Demoractic Candidates are Clinton and Sanders. Top 5 Republican candidates are Trump, Carson, Rudbio, Cruz and Bush. As of Nov 22nd, 2015 from [realclearpolitics.com](http://www.realclearpolitics.com/epolls/2016/president/us/2016_democratic_presidential_nomination-3824.html))
+
+This graph clearly shows when each candidate started ramping up their campaign to raise money. For example, Cruz started in late April while Bush didn't start until mid Jun. And even though Bush started much later than other candidates, he managed to come out on top of all Republican candidates.
+
+### Comparing Expenditure Cummulated Over Time of Top candidates
+
+```{r cum.exp, fig.heigh=10}
+
+top_can <- c("Trump","Carson","Rubio","Cruz","Bush","Clinton","Sanders")
+temp <- cum.exp %>% filter(candidate %in% top_can)
+
+ggplot(temp,aes(date,cum_expenditure/10^6)) + 
+  geom_line(aes(color=candidate,group=candidate),size=1.1) +
+  scale_x_date(breaks="1 month", labels=date_format("%b"),
+               limits=as.Date(c('2015-01-01','2015-9-15')))+
+ facet_wrap(~party,scales="free_y",ncol=2)+
+ ylab("Expenditure (in Million Dollars)")
+
+```
+
+Even with the steep raise in contribution as seen in the previous graph, Bush's spending has always been lower than Carson's.
+
+### States: Population vs. Contribution vs. Expenditure
+
+Now just for fun, Let's see if we can compare 3 different numerical variables in one chart:
+
+```{r pop_con_exp}
+
+ggplot(states,aes(x=expenditure/10^6,y=contribution/10^6)) +
+  geom_point(aes(color=population,size=population), alpha=0.8) +
+  scale_colour_gradient(low = "red", high="yellow") +
+  scale_size(range = c(3, 20)) +
+  scale_x_log10() + scale_y_log10()+
+  guides(color=guide_legend(), size = guide_legend()) +
+  xlab("Expenditure (in Million Dollars)") +
+  ylab("Contribution (in Million Dollars)")
+
+```
+
+This graph by itself shows that Contribution is proportional with Expenditure, Expenditure is proportional with Population, and Population is proportional with Contribution.
+
+## G. Multivariate Analysis
+
+(Note: I find it very awkward answering the questions below. My datasets, as it turned out, do not quite fit the provided project template. Many of my features of interest are cetegorical (States, Candidates, Regions, Occupation...), not numerical. So, asking to how strong a relation between these features does not make much sense.)
+
+### Talk about some of the relationships you observed in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?
+
+We found out that the average contribution toward Bernie Sanders was the smallest of all cadidates. That means his contributors often write smaller checks. We later examined the contributors' occupations, and discovered that Sanders is super popular among the unemployed, students and teachers. This finding is in-line with the small average contribution finding.
+
+### Were there any interesting or surprising interactions between features?
+
+Trump, the front runner on the Republican side, received very little in contribution. This is of no surprise since Trump himself claimed that he could fund his own campaign because he could afford it. However, his spending, eventhough reported to be higher the net contribution received, in nowhere near as high as all other popular candidates. Yet, he's leading the Republican. Either Trump is super effective in campaigning or the FEC does not require report on spending from money out of pocket.
+
+
+# 2. Final Plots
+
+
+## Plot One
+
+```{r final_1}
+
+# Order by Contribution Amount
+states$state <- factor(states$state, 
+                       levels = states$state[order(-states$contribution)])
+
+ggplot(states,aes(x=state, y=contribution/10^6)) + 
+  geom_bar(stat = "identity", fill="#6600CC") + guides(fill=FALSE) +
+  geom_text(aes(state,0.5+contribution/10^6,label=state), size=3) +
+  coord_cartesian(ylim=c(0,30)) + theme_bw() +
+  theme(panel.grid.major.x = element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title= element_text(size=15,vjust=1),
+        plot.title= element_text(size=20,vjust=1.5))+
+  labs(x="States",y="Total Contribution (in Million Dollars)",
+       title="Total Contribution Of Each State")
+
+```
+
+#### Description
+
+California, Texas, New York, and Florida are way ahead of other states in term of total contribution in the election so far. However, these States are either very either very populated, or well-off, or both.
+
+## Plot Two
+
+```{r final_2_prep}
+
+outliers <- contr_distr %>% select(name,amt=individual_contribution) %>% 
+  ddply(.(name), mutate, 
+  Q1=quantile(amt, 1/4), Q3=quantile(amt, 3/4), 
+  IQR=Q3-Q1, upper.limit=Q3+1.5*IQR, lower.limit=Q1-1.5*IQR) %>% tbl_df() %>% 
+  filter(amt>upper.limit | amt<lower.limit)
+
+
+```
+
+```{r final_2, fig.height=8}
+
+ggplot(contr_distr, aes(name, individual_contribution)) +
+  geom_boxplot(aes(fill=contributors),
+               color="black",outlier.shape=NA) +
+  geom_jitter(data=outliers,aes(name,amt),size=1, alpha=0.15,
+              position=position_jitter(width=0.2, height=5))+
+  scale_fill_continuous("Number of\nContributors",low="white",high="green")+
+  scale_y_sqrt(breaks=c(0,10,100,1000,2500,5000,10000,15000,20000,25000,30000),
+               label=comma) + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90,vjust=0.1,hjust=1),
+        axis.title= element_text(size=15,vjust=1),
+        plot.title= element_text(size=20,vjust=1.5))+
+  labs(x="State",y="Contribution Amount",
+       title="Contribution Distribution By States")
+
+```
+
+#### Description
+
+Most states have the first and third quartiles between $100 and $1000. New York has the highest median (at $1000) and a relatively high number of contributors. Texas also stands out with lots of outliers: Many are well above $10,000.
+
+## Plot Three
+
+```{r final_3, fig.height=12}
+
+ggplot(con_occ,aes(candidate,contributors,fill=party)) + 
+  geom_bar(stat="identity")+theme_bw()+
+  scale_fill_manual("Party",values=c("blue","red"))+
+  facet_wrap(~contbr_occupation,scales="free_y",ncol=3)+
+  theme(axis.text.x = element_text(angle = 90,vjust=0.2,hjust=1),
+        axis.title.x= element_text(size=15,vjust=0),
+        axis.title.y= element_text(size=15,vjust=1),
+        plot.title= element_text(size=20,vjust=1.5),
+        legend.position="top",legend.title=element_text(size=15))+
+  labs(x="Candidate",y="Number of Contributors",
+       title="Number of Contributors By Occupations")
+
+```
+
+#### Description
+
+We observe a trend in this graph: People of lower income brackets love Democrats, while the rich put their bets on the Republicans. Sanders gets almost all of the unemployed, while Bush gets most of the Self Employed.
+
+Interestingly enough, Software Engineers also much prefer Sanders than other candidates. In Education (Students, Teachers, Professors), Clinton and Sanders, the Democrat’s front runners, are also very popular. Meanwhile, the retired are mostly siding with the Republican candidates.
+
+# 3. Reflection
+
+I combined 8 different datasets about US 2016 Primary Election Contribution and US Economy to analyze the financial aspect of this election season.
+
+In the Bivariate section, the data was first dissected by States to compare their total contribution, number of contributors with various other economic features. I was surprised to find that Vermont was the most involved State. I then tried to find a correlation between the Involvement index vs. GDP per capita, Median Household Income, and Disposable Personal Income per capita. Unfortunately, there were no correlations. There must be other social factors, which this data doesn't capture, that can be better used to predict the Involvement of each State.
+
+In the Multivariate section, I explored the contribution and expenditure of the candidates. There was proof and Trump standing by his word (mostly!) about not asking for donation money. I also found proof of Sanders' popularity among the lower and middle classes. I wish the dataset provided by FEC includes more info about the contributors like Income, Gender, Age, Race, and Sexuality. Those features would have given us a fuller pictures of who are standing behind these candidates.
+
+# 4. References
+
+1. GGplot2 cheatsheet: [http://zevross.com/blog/2014/08/04/beautiful-plotting-in-r-a-ggplot2-cheatsheet-3/](http://zevross.com/blog/2014/08/04/beautiful-plotting-in-r-a-ggplot2-cheatsheet-3/)
+2. Pass Arguments to dplyr functions: [http://stackoverflow.com/questions/27975124/pass-arguments-to-dplyr-functions](http://stackoverflow.com/questions/27975124/pass-arguments-to-dplyr-functions)
+3. Using Lazyeval: [https://cran.r-project.org/web/packages/lazyeval/vignettes/lazyeval.html](https://cran.r-project.org/web/packages/lazyeval/vignettes/lazyeval.html)
+4. Plot outliers seperately: [http://stackoverflow.com/questions/15273148/coloring-boxplot-outlier-points-in-ggplot2](http://stackoverflow.com/questions/15273148/coloring-boxplot-outlier-points-in-ggplot2)
